@@ -1,4 +1,6 @@
-﻿using receive_system.core.Interfaces.Repositories;
+﻿using MongoDB.Driver;
+using receive_system.core.Entities;
+using receive_system.core.Interfaces.Repositories;
 using receive_system.root.Context;
 
 namespace receive_system.root.Repositories
@@ -16,6 +18,22 @@ namespace receive_system.root.Repositories
         {
             var collection = _context.GetCollection<T>(collectionName, databaseName);
             await collection.InsertOneAsync(log);
+        }
+
+        public async Task UpdateLogAsync(Envelope log, string collectionName, string databaseName)
+        {
+            var collection = _context.GetCollection<Envelope>(collectionName, databaseName);
+
+            var filter = Builders<Envelope>.Filter.Eq(x => x.CorrelationId, log.CorrelationId);
+
+            var update = Builders<Envelope>.Update
+                .Set(x => x.RetryCount, log.RetryCount)
+                .Set(x => x.Payload, log.Payload)
+                .Set(x => x.Type, log.Type)
+                .Set(x => x.Source, log.Source)
+                .Set(x => x.DateCreated, log.DateCreated);
+
+            await collection.UpdateOneAsync(filter, update);
         }
     }
 }
