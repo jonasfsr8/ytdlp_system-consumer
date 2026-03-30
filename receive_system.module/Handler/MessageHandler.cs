@@ -1,5 +1,4 @@
 ﻿using receive_system.core.Entities;
-using receive_system.core.Interfaces.Repositories;
 using receive_system.core.Interfaces.Messages;
 
 namespace receive_system.module.Handler
@@ -8,7 +7,7 @@ namespace receive_system.module.Handler
     {
         public async Task HandleAsync(Envelope message)
         {
-            throw new NotImplementedException();
+            //throw new NotImplementedException();
         }
     }
 }

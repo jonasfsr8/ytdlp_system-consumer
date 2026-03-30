@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using RabbitMQ.Client;
@@ -18,88 +19,127 @@ namespace receive_system.root.RabbitMq
         private readonly IRabbitMqConnection _connection;
         private readonly IServiceScopeFactory _scopeFactory;
         private readonly RabbitMqConfigDto _config;
+        private readonly ILogger<RabbitMqConsumer> _logger;
 
         public RabbitMqConsumer(
             IRabbitMqConnection connection,
             IServiceScopeFactory scopeFactory,
-            IOptions<RabbitMqConfigDto> config)
+            IOptions<RabbitMqConfigDto> config,
+            ILogger<RabbitMqConsumer> logger)
         {
             _connection = connection;
             _scopeFactory = scopeFactory;
             _config = config.Value;
+            _logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            var channel = await _connection.CreateChannel();
-
-            await channel.QueueDeclareAsync(
-                queue: _config.QueueName,
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: new Dictionary<string, object?> { { "x-queue-type", "classic" } });
-
-            await channel.QueueDeclareAsync(
-                queue: $"{_config.QueueName}-retry",
-                durable: true,
-                exclusive: false,
-                autoDelete: false,
-                arguments: new Dictionary<string, object?>
-                {
-                    { "x-message-ttl", 5000 },
-                    { "x-dead-letter-exchange", "" },
-                    { "x-dead-letter-routing-key", _config.QueueName }
-                });
-
-            var consumer = new AsyncEventingBasicConsumer(channel);
-
-            consumer.ReceivedAsync += async (sender, ea) =>
+            try
             {
-                var body = Encoding.UTF8.GetString(ea.Body.ToArray());
-                var message = JsonConvert.DeserializeObject<Envelope>(body);
+                _logger.LogInformation("[*] starting rabbitmq consumer...");
 
-                if (message == null)
-                {
-                    await channel.BasicAckAsync(ea.DeliveryTag, false);
-                    return;
-                }
+                var channel = await _connection.CreateChannel();
+                _logger.LogInformation("[*] channel created successfully");
 
-                using var scope = _scopeFactory.CreateScope();
+                await channel.QueueDeclareAsync(
+                    queue: _config.QueueName,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: new Dictionary<string, object?> { { "x-queue-type", "classic" } });
 
-                var handler = scope.ServiceProvider.GetRequiredService<IMessageHandler>();
-                var logRepository = scope.ServiceProvider.GetRequiredService<ILogRepository>();
+                _logger.LogInformation("[*] main queue declared: {queue}", _config.QueueName);
 
-                try
-                {
-                    if (message.RetryCount == 0)
-                        await logRepository.InsertLogAsync(message, "youtube_tasks", "messages");
-
-                    await handler.HandleAsync(message);
-
-                    await channel.BasicAckAsync(ea.DeliveryTag, false);
-                }
-                catch (Exception ex)
-                {
-                    const int maxRetry = 3;
-
-                    if (message.RetryCount < maxRetry)
+                await channel.QueueDeclareAsync(
+                    queue: $"{_config.QueueName}-retry",
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: new Dictionary<string, object?>
                     {
-                        message.RetryCount++;
+                { "x-message-ttl", 5000 },
+                { "x-dead-letter-exchange", "" },
+                { "x-dead-letter-routing-key", _config.QueueName }
+                    });
 
-                        await logRepository.UpdateLogAsync(message, "youtube_tasks", "messages");
+                _logger.LogInformation("[*] retry queue created: {retryQueue}", $"{_config.QueueName}-retry");
 
-                        await RetryMessage(channel, message);
+                var consumer = new AsyncEventingBasicConsumer(channel);
+
+                _logger.LogInformation("[*] awaiting messages...");
+
+                consumer.ReceivedAsync += async (sender, ea) =>
+                {
+                    _logger.LogInformation("[*] message received (deliverytag: {tag})", ea.DeliveryTag);
+
+                    var body = Encoding.UTF8.GetString(ea.Body.ToArray());
+                    var message = JsonConvert.DeserializeObject<Envelope>(body);
+
+                    if (message == null)
+                    {
+                        _logger.LogWarning("[*] invalid message (null). ignoring...");
+                        await channel.BasicAckAsync(ea.DeliveryTag, false);
+                        return;
                     }
 
-                    await channel.BasicAckAsync(ea.DeliveryTag, false);
-                }
-            };
+                    using var scope = _scopeFactory.CreateScope();
 
-            await channel.BasicConsumeAsync(
-                queue: _config.QueueName,
-                autoAck: false,
-                consumer: consumer);
+                    var handler = scope.ServiceProvider.GetRequiredService<IMessageHandler>();
+                    var logRepository = scope.ServiceProvider.GetRequiredService<ILogRepository>();
+
+                    try
+                    {
+                        _logger.LogInformation("[*] processing message | retrycount: {retry}", message.RetryCount);
+
+                        if (message.RetryCount == 0)
+                        {
+                            _logger.LogInformation("[*] inserting initial log into the database");
+                            await logRepository.InsertLogAsync(message, "youtube_tasks", "messages");
+                        }
+
+                        await handler.HandleAsync(message);
+
+                        _logger.LogInformation("[*] message processed successfully");
+
+                        await channel.BasicAckAsync(ea.DeliveryTag, false);
+                    }
+                    catch (Exception ex)
+                    {
+                        const int maxRetry = 3;
+
+                        _logger.LogError(ex, "[*] error processing message | retrycount current: {retry}", message.RetryCount);
+
+                        if (message.RetryCount < maxRetry)
+                        {
+                            message.RetryCount++;
+
+                            _logger.LogWarning("[*] sending to retry #{retry}", message.RetryCount);
+
+                            await logRepository.UpdateLogAsync(message, "youtube_tasks", "messages");
+
+                            await RetryMessage(channel, message);
+                        }
+                        else
+                        {
+                            _logger.LogError("[*] this message has reached its retrieval limit. ({maxRetry})", maxRetry);
+                        }
+
+                        await channel.BasicAckAsync(ea.DeliveryTag, false);
+                    }
+                };
+
+                await channel.BasicConsumeAsync(
+                    queue: _config.QueueName,
+                    autoAck: false,
+                    consumer: consumer);
+
+                _logger.LogInformation("[*] active consumer listening in the queue.: {queue}", _config.QueueName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogCritical(ex, $"[*] {ex.Message}");
+            }
         }
 
         private async Task RetryMessage(IChannel channel, Envelope message)

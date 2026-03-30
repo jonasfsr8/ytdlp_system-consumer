@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Options;
+﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using receive_system.root.DTOs;
 using receive_system.root.Interfaces;
@@ -9,9 +10,11 @@ namespace receive_system.root.RabbitMq
     {
         private readonly ConnectionFactory _factory;
         private IConnection? _connection;
+        private readonly ILogger<RabbitMqConnection> _logger;
 
-        public RabbitMqConnection(IOptions<RabbitMqConfigDto> config)
+        public RabbitMqConnection(IOptions<RabbitMqConfigDto> config, ILogger<RabbitMqConnection> logger)
         {
+            _logger = logger;
             var settings = config.Value;
 
             _factory = new ConnectionFactory
@@ -25,10 +28,18 @@ namespace receive_system.root.RabbitMq
 
         private async Task<IConnection> GetConnectionAsync()
         {
-            if (_connection != null && _connection.IsOpen)
+            if (_connection is not null && _connection.IsOpen)
                 return _connection;
 
-            _connection = await _factory.CreateConnectionAsync();
+            try
+            {
+                _connection = await _factory.CreateConnectionAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[*] error connecting to rabbitmq");
+            }
+
             return _connection;
         }
 
@@ -40,7 +51,7 @@ namespace receive_system.root.RabbitMq
 
         public async ValueTask DisposeAsync()
         {
-            if (_connection != null)
+            if (_connection is not null)
             {
                 if (_connection.IsOpen)
                     await _connection.CloseAsync();
