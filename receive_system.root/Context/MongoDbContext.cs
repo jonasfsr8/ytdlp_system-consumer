@@ -8,7 +8,7 @@ namespace receive_system.root.Context
     {
         private readonly IMongoClient _client;
 
-        public MongoContext(IMongoClient client, IOptions<MongoDbConfigDto> config)
+        public MongoContext(IMongoClient client, IOptions<MongoDbSettingsDto> config)
         {
             _client = client;
         }

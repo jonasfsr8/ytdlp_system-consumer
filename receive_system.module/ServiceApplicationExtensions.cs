@@ -1,6 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using receive_system.core.Interfaces.Messages;
-using receive_system.module.Handler;
+using receive_system.module.Handlers;
 
 namespace receive_system.module
 {

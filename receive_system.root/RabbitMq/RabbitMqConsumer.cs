@@ -18,13 +18,13 @@ namespace receive_system.root.RabbitMq
     {
         private readonly IRabbitMqConnection _connection;
         private readonly IServiceScopeFactory _scopeFactory;
-        private readonly RabbitMqConfigDto _config;
+        private readonly RabbitMqSettingsDto _config;
         private readonly ILogger<RabbitMqConsumer> _logger;
 
         public RabbitMqConsumer(
             IRabbitMqConnection connection,
             IServiceScopeFactory scopeFactory,
-            IOptions<RabbitMqConfigDto> config,
+            IOptions<RabbitMqSettingsDto> config,
             ILogger<RabbitMqConsumer> logger)
         {
             _connection = connection;
@@ -40,45 +40,58 @@ namespace receive_system.root.RabbitMq
                 _logger.LogInformation("[*] starting rabbitmq consumer...");
 
                 var channel = await _connection.CreateChannel();
-                _logger.LogInformation("[*] channel created successfully");
 
+                // Controle de carga
+                await channel.BasicQosAsync(0, 1, false);
+
+                var mainQueue = _config.QueueName;
+                var retryQueue = $"{mainQueue}-retry";
+                var deadQueue = $"{mainQueue}-dead";
+
+                // Main queue
                 await channel.QueueDeclareAsync(
-                    queue: _config.QueueName,
+                    queue: mainQueue,
                     durable: true,
                     exclusive: false,
-                    autoDelete: false,
-                    arguments: new Dictionary<string, object?> { { "x-queue-type", "classic" } });
+                    autoDelete: false);
 
-                _logger.LogInformation("[*] main queue declared: {queue}", _config.QueueName);
-
+                // Dead-letter queue
                 await channel.QueueDeclareAsync(
-                    queue: $"{_config.QueueName}-retry",
+                    queue: deadQueue,
                     durable: true,
                     exclusive: false,
                     autoDelete: false,
                     arguments: new Dictionary<string, object?>
                     {
-                { "x-message-ttl", 5000 },
-                { "x-dead-letter-exchange", "" },
-                { "x-dead-letter-routing-key", _config.QueueName }
+                        { "x-dead-letter-exchange", "" },
+                        { "x-dead-letter-routing-key", deadQueue }
                     });
 
-                _logger.LogInformation("[*] retry queue created: {retryQueue}", $"{_config.QueueName}-retry");
+                // Retry queue
+                await channel.QueueDeclareAsync(
+                    queue: retryQueue,
+                    durable: true,
+                    exclusive: false,
+                    autoDelete: false,
+                    arguments: new Dictionary<string, object?>
+                    {
+                        { "x-message-ttl", 5000 },
+                        { "x-dead-letter-exchange", "" },
+                        { "x-dead-letter-routing-key", mainQueue }
+                    });
 
                 var consumer = new AsyncEventingBasicConsumer(channel);
 
-                _logger.LogInformation("[*] awaiting messages...");
-
                 consumer.ReceivedAsync += async (sender, ea) =>
                 {
-                    _logger.LogInformation("[*] message received (deliverytag: {tag})", ea.DeliveryTag);
+                    if (stoppingToken.IsCancellationRequested)
+                        return;
 
                     var body = Encoding.UTF8.GetString(ea.Body.ToArray());
                     var message = JsonConvert.DeserializeObject<Envelope>(body);
 
-                    if (message == null)
+                    if (message is null || string.IsNullOrWhiteSpace(message.Payload))
                     {
-                        _logger.LogWarning("[*] invalid message (null). ignoring...");
                         await channel.BasicAckAsync(ea.DeliveryTag, false);
                         return;
                     }
@@ -90,11 +103,8 @@ namespace receive_system.root.RabbitMq
 
                     try
                     {
-                        _logger.LogInformation("[*] processing message | retrycount: {retry}", message.RetryCount);
-
                         if (message.RetryCount == 0)
                         {
-                            _logger.LogInformation("[*] inserting initial log into the database");
                             await logRepository.InsertLogAsync(message, "youtube_tasks", "messages");
                         }
 
@@ -108,13 +118,9 @@ namespace receive_system.root.RabbitMq
                     {
                         const int maxRetry = 3;
 
-                        _logger.LogError(ex, "[*] error processing message | retrycount current: {retry}", message.RetryCount);
-
                         if (message.RetryCount < maxRetry)
                         {
                             message.RetryCount++;
-
-                            _logger.LogWarning("[*] sending to retry #{retry}", message.RetryCount);
 
                             await logRepository.UpdateLogAsync(message, "youtube_tasks", "messages");
 
@@ -122,7 +128,10 @@ namespace receive_system.root.RabbitMq
                         }
                         else
                         {
-                            _logger.LogError("[*] this message has reached its retrieval limit. ({maxRetry})", maxRetry);
+                            await channel.BasicPublishAsync(
+                                exchange: "",
+                                routingKey: deadQueue,
+                                body: Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message)));
                         }
 
                         await channel.BasicAckAsync(ea.DeliveryTag, false);
@@ -130,15 +139,16 @@ namespace receive_system.root.RabbitMq
                 };
 
                 await channel.BasicConsumeAsync(
-                    queue: _config.QueueName,
+                    queue: mainQueue,
                     autoAck: false,
                     consumer: consumer);
 
-                _logger.LogInformation("[*] active consumer listening in the queue.: {queue}", _config.QueueName);
+                // mantém o serviço vivo
+                await Task.Delay(Timeout.Infinite, stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogCritical(ex, $"[*] {ex.Message}");
+                _logger.LogCritical(ex, "[*] critical error in consumer");
             }
         }
 

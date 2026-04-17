@@ -12,7 +12,7 @@ namespace receive_system.root.RabbitMq
         private IConnection? _connection;
         private readonly ILogger<RabbitMqConnection> _logger;
 
-        public RabbitMqConnection(IOptions<RabbitMqConfigDto> config, ILogger<RabbitMqConnection> logger)
+        public RabbitMqConnection(IOptions<RabbitMqSettingsDto> config, ILogger<RabbitMqConnection> logger)
         {
             _logger = logger;
             var settings = config.Value;
@@ -26,7 +26,7 @@ namespace receive_system.root.RabbitMq
             };
         }
 
-        private async Task<IConnection> GetConnectionAsync()
+        public async Task<IConnection> GetConnectionAsync()
         {
             if (_connection is not null && _connection.IsOpen)
                 return _connection;
@@ -34,13 +34,13 @@ namespace receive_system.root.RabbitMq
             try
             {
                 _connection = await _factory.CreateConnectionAsync();
+                return _connection;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[*] error connecting to rabbitmq");
+                throw;
             }
-
-            return _connection;
         }
 
         public async Task<IChannel> CreateChannel()
