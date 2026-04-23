@@ -37,7 +37,7 @@ namespace receive_system.root.ExternalServices
                     "1080p" => $"-f \"bestvideo[height<=1080]+bestaudio/best[height<=1080]\" -o \"{outputPath}\" {url}",
                     "1440p" => $"-f \"bestvideo[height<=1440]+bestaudio/best[height<=1440]\" -o \"{outputPath}\" {url}",
                     "2160p" => $"-f \"bestvideo[height<=2160]+bestaudio/best[height<=2160]\" -o \"{outputPath}\" {url}",
-                    _ => throw new Exception("Formato inválido")
+                    _ => throw new Exception("Invalid format.")
                 };
             }
 
