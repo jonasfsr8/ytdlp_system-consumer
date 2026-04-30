@@ -96,6 +96,9 @@ namespace receive_system.root.RabbitMq
                         return;
                     }
 
+                    if (message.Type == "best")
+                        message.Type = "mp3";
+
                     using var scope = _scopeFactory.CreateScope();
 
                     var handler = scope.ServiceProvider.GetRequiredService<IMessageHandler>();
